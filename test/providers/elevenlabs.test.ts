@@ -212,13 +212,16 @@ describe("ElevenLabs auth classification", () => {
         fetch: sequentialFetch([
           new Response(
             JSON.stringify({
-              detail: { status: "missing_permissions", message: providerMessage },
+              detail: {
+                status: "missing_permissions",
+                message: providerMessage,
+              },
             }),
             { status: 401 },
           ),
         ]),
         deleteCachedProvider: deleted,
-        readCachedProvider: () => hasCache ? cachedQuota() : undefined,
+        readCachedProvider: () => (hasCache ? cachedQuota() : undefined),
       }).fetchQuota(OPTIONS);
 
       expect(report.state.status).toBe(hasCache ? "stale" : "error");
@@ -234,27 +237,33 @@ describe("ElevenLabs auth classification", () => {
   it.each([
     '{"detail":{"status":"invalid_api_key","message":"missing_permissions"}}',
     '{"detail":"missing_permissions"}',
-    'missing_permissions',
-  ])("does not infer permission denial from an unrecognized 401 body: %s", async (body) => {
-    const report = await testAdapter({
-      fetch: sequentialFetch([new Response(body, { status: 401 })]),
-    }).fetchQuota(OPTIONS);
+    "missing_permissions",
+  ])(
+    "does not infer permission denial from an unrecognized 401 body: %s",
+    async (body) => {
+      const report = await testAdapter({
+        fetch: sequentialFetch([new Response(body, { status: 401 })]),
+      }).fetchQuota(OPTIONS);
 
-    expect(report.state.status).toBe("auth_required");
-    expect(report.state.error).toBe("provider_auth_rejected");
-  });
+      expect(report.state.status).toBe("auth_required");
+      expect(report.state.error).toBe("provider_auth_rejected");
+    },
+  );
 
   it("bounds a 401 body before classifying it and preserves uncertain cache", async () => {
     const deleted = vi.fn();
     const cancel = vi.fn();
     const report = await testAdapter({
       fetch: sequentialFetch([
-        new Response(new ReadableStream({
-          start(controller) {
-            controller.enqueue(new Uint8Array(262_145));
-          },
-          cancel,
-        }), { status: 401 }),
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(new Uint8Array(262_145));
+            },
+            cancel,
+          }),
+          { status: 401 },
+        ),
       ]),
       deleteCachedProvider: deleted,
       readCachedProvider: () => cachedQuota(),
@@ -344,14 +353,18 @@ describe("ElevenLabs payload normalization", () => {
     "interprets the reset field as Unix seconds: %s",
     async (seconds) => {
       const report = await testAdapter({
-        fetch: sequentialFetch([jsonResponse({
-          ...(SUBSCRIPTION as Record<string, unknown>),
-          next_character_count_reset_unix: seconds,
-        })]),
+        fetch: sequentialFetch([
+          jsonResponse({
+            ...(SUBSCRIPTION as Record<string, unknown>),
+            next_character_count_reset_unix: seconds,
+          }),
+        ]),
       }).fetchQuota(OPTIONS);
 
       expect(report.state.status).toBe("fresh");
-      expect(report.windows[0].resetsAt).toBe(new Date(seconds * 1000).toISOString());
+      expect(report.windows[0].resetsAt).toBe(
+        new Date(seconds * 1000).toISOString(),
+      );
     },
   );
 
@@ -420,35 +433,38 @@ describe("ElevenLabs quota semantics", () => {
     [99_999, 99.999, 0.001],
     [100_000, 100, 0],
     [100_001, 100, 0],
-  ])("preserves headroom until the character limit is reached: %s used", async (used, percentUsed, remaining) => {
-    const report = withQuotaSemantics(
-      await testAdapter({
-        fetch: sequentialFetch([
-          jsonResponse({
-            ...(SUBSCRIPTION as Record<string, unknown>),
-            character_count: used,
-            character_limit: 100_000,
-            next_character_count_reset_unix: (NOW + 604_800_000) / 1000,
-          }),
-        ]),
-      }).fetchQuota(OPTIONS),
-      new Date(NOW).toISOString(),
-    );
+  ])(
+    "preserves headroom until the character limit is reached: %s used",
+    async (used, percentUsed, remaining) => {
+      const report = withQuotaSemantics(
+        await testAdapter({
+          fetch: sequentialFetch([
+            jsonResponse({
+              ...(SUBSCRIPTION as Record<string, unknown>),
+              character_count: used,
+              character_limit: 100_000,
+              next_character_count_reset_unix: (NOW + 604_800_000) / 1000,
+            }),
+          ]),
+        }).fetchQuota(OPTIONS),
+        new Date(NOW).toISOString(),
+      );
 
-    expect(report.state.status).toBe("fresh");
-    expect(report.windows[0].percentUsed).toBeCloseTo(percentUsed, 8);
-    expect(report.windows[0].percentRemaining).toBeCloseTo(remaining, 8);
-    const availability = report.quotaSemantics?.effectiveAvailability[0];
-    expect(availability?.effectivePercentRemaining).toBeCloseTo(remaining, 8);
-    expect(availability?.runway?.status).toBe(
-      remaining > 0 ? "projected_exhaustion" : "exhausted_now",
-    );
-    if (remaining > 0) {
-      expect(availability?.runway?.usableRunwaySeconds).toBeGreaterThan(0);
-    } else {
-      expect(availability?.runway?.usableRunwaySeconds).toBe(0);
-    }
-  });
+      expect(report.state.status).toBe("fresh");
+      expect(report.windows[0].percentUsed).toBeCloseTo(percentUsed, 8);
+      expect(report.windows[0].percentRemaining).toBeCloseTo(remaining, 8);
+      const availability = report.quotaSemantics?.effectiveAvailability[0];
+      expect(availability?.effectivePercentRemaining).toBeCloseTo(remaining, 8);
+      expect(availability?.runway?.status).toBe(
+        remaining > 0 ? "projected_exhaustion" : "exhausted_now",
+      );
+      if (remaining > 0) {
+        expect(availability?.runway?.usableRunwaySeconds).toBeGreaterThan(0);
+      } else {
+        expect(availability?.runway?.usableRunwaySeconds).toBe(0);
+      }
+    },
+  );
 
   it("bounds included_characters only, never all_models or a model scope", async () => {
     const report = withQuotaSemantics(
@@ -486,37 +502,50 @@ describe("ElevenLabs cache identity", () => {
     ["invalid local key", "$OTHER", true],
     ["rejected different key", OTHER_KEY, true],
     ["rejected same key", SYNTHETIC_KEY, false],
-  ])("retires only the identified key's disk snapshot: %s", async (_label, key, preserved) => {
-    const directory = mkdtempSync(join(process.cwd(), ".elevenlabs-cache-"));
-    vi.stubEnv("XDG_CACHE_HOME", directory);
-    try {
-      const makeAdapter = (credential: string | undefined, response: Response) =>
-        createElevenLabsAdapter({
-          envSource: envSource(credential),
-          fetch: sequentialFetch([response]),
-          now: () => NOW,
-        });
-      const fresh = await makeAdapter(SYNTHETIC_KEY, jsonResponse({
-        ...(SUBSCRIPTION as Record<string, unknown>),
-        next_character_count_reset_unix: (NOW + 604_800_000) / 1000,
-      })).fetchQuota(OPTIONS);
-      expect(fresh.state.status).toBe("fresh");
-      writeCachedProviders([fresh]);
+  ])(
+    "retires only the identified key's disk snapshot: %s",
+    async (_label, key, preserved) => {
+      const directory = mkdtempSync(join(process.cwd(), ".elevenlabs-cache-"));
+      vi.stubEnv("XDG_CACHE_HOME", directory);
+      try {
+        const makeAdapter = (
+          credential: string | undefined,
+          response: Response,
+        ) =>
+          createElevenLabsAdapter({
+            envSource: envSource(credential),
+            fetch: sequentialFetch([response]),
+            now: () => NOW,
+          });
+        const fresh = await makeAdapter(
+          SYNTHETIC_KEY,
+          jsonResponse({
+            ...(SUBSCRIPTION as Record<string, unknown>),
+            next_character_count_reset_unix: (NOW + 604_800_000) / 1000,
+          }),
+        ).fetchQuota(OPTIONS);
+        expect(fresh.state.status).toBe("fresh");
+        writeCachedProviders([fresh]);
 
-      const rejected = await makeAdapter(key, new Response(null, { status: 401 }))
-        .fetchQuota(OPTIONS);
-      expect(rejected.state.status).toBe("auth_required");
-      writeCachedProviders([rejected]);
+        const rejected = await makeAdapter(
+          key,
+          new Response(null, { status: 401 }),
+        ).fetchQuota(OPTIONS);
+        expect(rejected.state.status).toBe("auth_required");
+        writeCachedProviders([rejected]);
 
-      const restored = await makeAdapter(SYNTHETIC_KEY, new Response(null, { status: 503 }))
-        .fetchQuota(OPTIONS);
-      expect(restored.source).toBe(preserved ? "cache" : "unavailable");
-      expect(restored.windows).toEqual(preserved ? fresh.windows : []);
-    } finally {
-      vi.unstubAllEnvs();
-      rmSync(directory, { recursive: true, force: true });
-    }
-  });
+        const restored = await makeAdapter(
+          SYNTHETIC_KEY,
+          new Response(null, { status: 503 }),
+        ).fetchQuota(OPTIONS);
+        expect(restored.source).toBe(preserved ? "cache" : "unavailable");
+        expect(restored.windows).toEqual(preserved ? fresh.windows : []);
+      } finally {
+        vi.unstubAllEnvs();
+        rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("gives each key its own opaque identity and leaks neither key", () => {
     const mine = elevenLabsCacheContextId(

@@ -36,7 +36,7 @@ export const ELEVENLABS_API_KEY_SOURCE = "env:ELEVENLABS_API_KEY";
  * falling back to `<config dir>/elevenlabs/auth-keyring.json`. That store is
  * deliberately not read here: its entry is an opaque token bundle this tree has
  * no verified shape for, and guessing at one would risk sending the wrong
- * string as a bearer.
+ * string as a credential.
  */
 export const ELEVENLABS_SOURCE_ORDER = [ELEVENLABS_API_KEY_SOURCE] as const;
 
