@@ -415,6 +415,41 @@ describe("ElevenLabs payload normalization", () => {
 });
 
 describe("ElevenLabs quota semantics", () => {
+  it.each([
+    [99_600, 99.6, 0.4],
+    [99_999, 99.999, 0.001],
+    [100_000, 100, 0],
+    [100_001, 100, 0],
+  ])("preserves headroom until the character limit is reached: %s used", async (used, percentUsed, remaining) => {
+    const report = withQuotaSemantics(
+      await testAdapter({
+        fetch: sequentialFetch([
+          jsonResponse({
+            ...(SUBSCRIPTION as Record<string, unknown>),
+            character_count: used,
+            character_limit: 100_000,
+            next_character_count_reset_unix: (NOW + 604_800_000) / 1000,
+          }),
+        ]),
+      }).fetchQuota(OPTIONS),
+      new Date(NOW).toISOString(),
+    );
+
+    expect(report.state.status).toBe("fresh");
+    expect(report.windows[0].percentUsed).toBeCloseTo(percentUsed, 8);
+    expect(report.windows[0].percentRemaining).toBeCloseTo(remaining, 8);
+    const availability = report.quotaSemantics?.effectiveAvailability[0];
+    expect(availability?.effectivePercentRemaining).toBeCloseTo(remaining, 8);
+    expect(availability?.runway?.status).toBe(
+      remaining > 0 ? "projected_exhaustion" : "exhausted_now",
+    );
+    if (remaining > 0) {
+      expect(availability?.runway?.usableRunwaySeconds).toBeGreaterThan(0);
+    } else {
+      expect(availability?.runway?.usableRunwaySeconds).toBe(0);
+    }
+  });
+
   it("bounds included_characters only, never all_models or a model scope", async () => {
     const report = withQuotaSemantics(
       await testAdapter({

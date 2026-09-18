@@ -4,7 +4,7 @@ import {
 } from "../cache.js";
 import { providerFetch } from "../lib/http.js";
 import { usableLiteralSecret } from "../lib/secret.js";
-import { clampPercent, retryAfterToIso } from "../lib/time.js";
+import { retryAfterToIso } from "../lib/time.js";
 import type {
   AuthProviderReport,
   AuthSourceReport,
@@ -552,7 +552,7 @@ export function normalizeElevenLabsPayload(
   const windows: QuotaWindow[] = [];
   // A zero or absent limit measures nothing; `used / 0` is not 100% used.
   if (used !== undefined && limit !== undefined && limit > 0) {
-    const percentUsed = clampPercent((used / limit) * 100);
+    const percentUsed = Math.min(100, (used / limit) * 100);
     const resetsAt = parseResetUnix(root.next_character_count_reset_unix);
     const months = refreshPeriodMonths(root.character_refresh_period);
     const startsAt =
@@ -564,7 +564,7 @@ export function normalizeElevenLabsPayload(
       label: "characters",
       kind: months === 1 ? "monthly" : "unknown",
       percentUsed,
-      percentRemaining: clampPercent(100 - percentUsed),
+      percentRemaining: Math.max(0, ((limit - used) / limit) * 100),
       ...(startsAt ? { startsAt } : {}),
       ...(resetsAt ? { resetsAt } : {}),
     });
