@@ -1,6 +1,7 @@
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { writeCachedProviders } from "../../src/cache.js";
 import { withQuotaSemantics } from "../../src/interpretation.js";
 import {
   createElevenLabsAdapter,
@@ -202,6 +203,87 @@ describe("ElevenLabs credential matrix", () => {
 });
 
 describe("ElevenLabs auth classification", () => {
+  it.each([false, true])(
+    "preserves a restricted key's auth and cache (cached: %s)",
+    async (hasCache) => {
+      const deleted = vi.fn();
+      const providerMessage = `Permission denied for ${SYNTHETIC_KEY}`;
+      const report = await testAdapter({
+        fetch: sequentialFetch([
+          new Response(
+            JSON.stringify({
+              detail: { status: "missing_permissions", message: providerMessage },
+            }),
+            { status: 401 },
+          ),
+        ]),
+        deleteCachedProvider: deleted,
+        readCachedProvider: () => hasCache ? cachedQuota() : undefined,
+      }).fetchQuota(OPTIONS);
+
+      expect(report.state.status).toBe(hasCache ? "stale" : "error");
+      expect(report.state.authStatus).toBe("usable");
+      expect(report.state.error).toBe("elevenlabs_user_read_denied");
+      expect(report.windows).toEqual(hasCache ? cachedQuota().windows : []);
+      expect(deleted).not.toHaveBeenCalled();
+      expect(JSON.stringify(report)).not.toContain(providerMessage);
+      expect(JSON.stringify(report)).not.toContain(SYNTHETIC_KEY);
+    },
+  );
+
+  it.each([
+    '{"detail":{"status":"invalid_api_key","message":"missing_permissions"}}',
+    '{"detail":"missing_permissions"}',
+    'missing_permissions',
+  ])("does not infer permission denial from an unrecognized 401 body: %s", async (body) => {
+    const report = await testAdapter({
+      fetch: sequentialFetch([new Response(body, { status: 401 })]),
+    }).fetchQuota(OPTIONS);
+
+    expect(report.state.status).toBe("auth_required");
+    expect(report.state.error).toBe("provider_auth_rejected");
+  });
+
+  it("bounds a 401 body before classifying it and preserves uncertain cache", async () => {
+    const deleted = vi.fn();
+    const cancel = vi.fn();
+    const report = await testAdapter({
+      fetch: sequentialFetch([
+        new Response(new ReadableStream({
+          start(controller) {
+            controller.enqueue(new Uint8Array(262_145));
+          },
+          cancel,
+        }), { status: 401 }),
+      ]),
+      deleteCachedProvider: deleted,
+      readCachedProvider: () => cachedQuota(),
+    }).fetchQuota(OPTIONS);
+
+    expect(report.state.status).toBe("stale");
+    expect(report.state.error).toBe("response_too_large");
+    expect(deleted).not.toHaveBeenCalled();
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it("times out a stalled 401 body without declaring sign-out", async () => {
+    const deleted = vi.fn();
+    const cancel = vi.fn();
+    const report = await testAdapter({
+      fetch: sequentialFetch([
+        new Response(new ReadableStream({ cancel }), { status: 401 }),
+      ]),
+      deadlineMs: 10,
+      deleteCachedProvider: deleted,
+      readCachedProvider: () => cachedQuota(),
+    }).fetchQuota(OPTIONS);
+
+    expect(report.state.status).toBe("stale");
+    expect(report.state.error).toBe("request_timeout");
+    expect(deleted).not.toHaveBeenCalled();
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
   it("treats HTTP 403 as a live key this operation refuses, not a sign-out", async () => {
     const deleted: string[] = [];
     const report = await testAdapter({
@@ -258,6 +340,21 @@ describe("ElevenLabs auth classification", () => {
 });
 
 describe("ElevenLabs payload normalization", () => {
+  it.each([1_783_814_400, 1_783_814_400_000])(
+    "interprets the reset field as Unix seconds: %s",
+    async (seconds) => {
+      const report = await testAdapter({
+        fetch: sequentialFetch([jsonResponse({
+          ...(SUBSCRIPTION as Record<string, unknown>),
+          next_character_count_reset_unix: seconds,
+        })]),
+      }).fetchQuota(OPTIONS);
+
+      expect(report.state.status).toBe("fresh");
+      expect(report.windows[0].resetsAt).toBe(new Date(seconds * 1000).toISOString());
+    },
+  );
+
   it("guards a zero character limit instead of deriving a percentage", () => {
     const normalized = normalizeElevenLabsPayload(ENTITLEMENT_ONLY);
     expect(normalized.windows).toEqual([]);
@@ -349,6 +446,43 @@ describe("ElevenLabs quota semantics", () => {
 });
 
 describe("ElevenLabs cache identity", () => {
+  it.each([
+    ["absent key", undefined, true],
+    ["invalid local key", "$OTHER", true],
+    ["rejected different key", OTHER_KEY, true],
+    ["rejected same key", SYNTHETIC_KEY, false],
+  ])("retires only the identified key's disk snapshot: %s", async (_label, key, preserved) => {
+    const directory = mkdtempSync(join(process.cwd(), ".elevenlabs-cache-"));
+    vi.stubEnv("XDG_CACHE_HOME", directory);
+    try {
+      const makeAdapter = (credential: string | undefined, response: Response) =>
+        createElevenLabsAdapter({
+          envSource: envSource(credential),
+          fetch: sequentialFetch([response]),
+          now: () => NOW,
+        });
+      const fresh = await makeAdapter(SYNTHETIC_KEY, jsonResponse({
+        ...(SUBSCRIPTION as Record<string, unknown>),
+        next_character_count_reset_unix: (NOW + 604_800_000) / 1000,
+      })).fetchQuota(OPTIONS);
+      expect(fresh.state.status).toBe("fresh");
+      writeCachedProviders([fresh]);
+
+      const rejected = await makeAdapter(key, new Response(null, { status: 401 }))
+        .fetchQuota(OPTIONS);
+      expect(rejected.state.status).toBe("auth_required");
+      writeCachedProviders([rejected]);
+
+      const restored = await makeAdapter(SYNTHETIC_KEY, new Response(null, { status: 503 }))
+        .fetchQuota(OPTIONS);
+      expect(restored.source).toBe(preserved ? "cache" : "unavailable");
+      expect(restored.windows).toEqual(preserved ? fresh.windows : []);
+    } finally {
+      vi.unstubAllEnvs();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("gives each key its own opaque identity and leaks neither key", () => {
     const mine = elevenLabsCacheContextId(
       ELEVENLABS_API_KEY_SOURCE,

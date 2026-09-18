@@ -301,9 +301,11 @@ function failureReport(
   attempts: SourceAttempt[],
   dependencies: ElevenLabsDependencies,
 ): ProviderQuota {
-  if (failure.definitiveAuth) {
+  if (failure.definitiveAuth && cacheContextId) {
     try {
-      dependencies.deleteCachedProvider("elevenlabs");
+      if (dependencies.readCachedProvider(cacheContextId)) {
+        dependencies.deleteCachedProvider("elevenlabs");
+      }
     } catch {
       // The current auth failure is still definitive even if the cache is not writable.
     }
@@ -419,7 +421,9 @@ async function requestSubscription(
 
   const lifetime = createResponseBodyLifetime(response);
   try {
-    rejectHttpFailure(response, dependencies.now());
+    if (response.status !== 401) {
+      rejectHttpFailure(response, dependencies.now());
+    }
 
     let bytes: Uint8Array;
     try {
@@ -439,33 +443,45 @@ async function requestSubscription(
     try {
       text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
     } catch {
+      rejectHttpFailure(response, dependencies.now());
       throw new ElevenLabsFailure("response_invalid_utf8", {
         staleEligible: true,
       });
     }
+    let payload: unknown;
     try {
-      return JSON.parse(text) as unknown;
+      payload = JSON.parse(text) as unknown;
     } catch {
+      rejectHttpFailure(response, dependencies.now());
       throw new ElevenLabsFailure("malformed_json", { staleEligible: true });
     }
+    rejectHttpFailure(response, dependencies.now(), payload);
+    return payload;
   } finally {
     await lifetime.cancel();
   }
 }
 
-function rejectHttpFailure(response: Response, receivedAt: number): void {
+function rejectHttpFailure(
+  response: Response,
+  receivedAt: number,
+  payload?: unknown,
+): void {
   const status = response.status;
   if (status === 200) return;
   if (status >= 300 && status <= 399) {
     throw new ElevenLabsFailure("redirect_rejected", { staleEligible: true });
   }
-  if (status === 401) {
+  const permissionDenied =
+    status === 401 &&
+    objectValue(objectValue(payload)?.detail)?.status === "missing_permissions";
+  if (status === 401 && !permissionDenied) {
     throw new ElevenLabsFailure("provider_auth_rejected", {
       status: "auth_required",
       definitiveAuth: true,
     });
   }
-  if (status === 403) {
+  if (status === 403 || permissionDenied) {
     // A live key that this operation refuses: ElevenLabs keys carry scope
     // restrictions (the subscription read needs `user_read`) and an IP
     // allowlist, and either rejects the call without the key being signed out.
@@ -561,17 +577,11 @@ function refreshPeriodMonths(value: unknown): number | undefined {
   return typeof value === "string" ? REFRESH_PERIOD_MONTHS[value] : undefined;
 }
 
-/**
- * The reset instant the vendor reports. Documented as Unix seconds; a value
- * already in milliseconds is accepted on the same magnitude rule
- * `src/providers/commandcode.ts` uses, and anything that cannot be a real reset
- * (zero, negative, pre-2001) resolves to no reset rather than to 1970.
- */
 function parseResetUnix(value: unknown): string | undefined {
   const minResetMs = 1_000_000_000_000;
   const seconds = nonnegativeFinite(value);
   if (seconds === undefined || seconds <= 0) return undefined;
-  const ms = seconds >= minResetMs ? seconds : seconds * 1000;
+  const ms = seconds * 1000;
   if (!Number.isFinite(ms) || ms < minResetMs) return undefined;
   const date = new Date(ms);
   return Number.isNaN(date.getTime()) ? undefined : date.toISOString();

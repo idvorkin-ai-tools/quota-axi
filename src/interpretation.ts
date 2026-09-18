@@ -176,36 +176,14 @@ function semanticsFor(
  * usage past the included allowance, so a zeroed window says that allowance is
  * spent, not that requests stop. It is a speech allowance rather than a
  * coding-agent lane, so it never binds a model scope either.
- *
- * An unfamiliar window is never folded into that bound, and an entitlement-only
- * response reports no window rather than a percentage.
  */
 function elevenLabsSemantics(
   windows: QuotaWindow[],
   generatedAt: string,
 ): QuotaSemantics {
   const characters = windows.filter(({ id }) => id === "characters");
-  const unresolved = windows.filter(({ id }) => id !== "characters");
   const description =
     "ElevenLabs' characters window is the subscription plan's included character allowance for the current refresh period, so it bounds the included_characters scope only. Plans that can extend the character limit bill usage past it, so a zeroed window means the included allowance is spent, not that requests are refused.";
-  if (unresolved.length > 0) {
-    const unresolvedWindowIds = unresolved.map(({ id }) => id);
-    return {
-      status: "partial",
-      description,
-      effectiveAvailability:
-        characters.length > 0
-          ? [
-              unresolvedAvailability(
-                "included_characters",
-                characters,
-                unresolvedWindowIds,
-              ),
-            ]
-          : [],
-      unresolvedWindowIds,
-    };
-  }
   return knownSemantics(
     characters.length > 0
       ? [availability("included_characters", characters, generatedAt)]
