@@ -534,7 +534,7 @@ function rejectHttpFailure(
  */
 export function normalizeElevenLabsPayload(
   payload: unknown,
-  now?: number,
+  now: number,
 ): NormalizedElevenLabsPayload {
   const root = objectValue(payload);
   if (!root) {
@@ -561,10 +561,7 @@ export function normalizeElevenLabsPayload(
     // A reset the vendor says has already passed means these counters belong
     // to a finished cycle. The stale-cache path drops such a window; the live
     // path must too, or an expired percentage is served as current headroom.
-    const expired =
-      now !== undefined &&
-      resetsAt !== undefined &&
-      Date.parse(resetsAt) <= now;
+    const expired = resetsAt !== undefined && Date.parse(resetsAt) <= now;
     const months = refreshPeriodMonths(root.character_refresh_period);
     const startsAt =
       resetsAt && months !== undefined

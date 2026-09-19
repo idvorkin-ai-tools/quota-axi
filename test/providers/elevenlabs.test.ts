@@ -371,7 +371,7 @@ describe("ElevenLabs payload normalization", () => {
   );
 
   it("guards a zero character limit instead of deriving a percentage", () => {
-    const normalized = normalizeElevenLabsPayload(ENTITLEMENT_ONLY);
+    const normalized = normalizeElevenLabsPayload(ENTITLEMENT_ONLY, NOW);
     expect(normalized.windows).toEqual([]);
     expect(normalized.plan).toBe("free");
   });
@@ -388,7 +388,7 @@ describe("ElevenLabs payload normalization", () => {
   });
 
   it("steps the cycle start back by the vendor's declared refresh period", () => {
-    const [window] = normalizeElevenLabsPayload(ANNUAL_REFRESH).windows;
+    const [window] = normalizeElevenLabsPayload(ANNUAL_REFRESH, NOW).windows;
     expect(window.startsAt).toBe("2025-07-12T00:00:00.000Z");
     expect(window.resetsAt).toBe("2026-07-12T00:00:00.000Z");
     // Only `monthly_period` maps onto the published `monthly` window kind.
@@ -396,7 +396,7 @@ describe("ElevenLabs payload normalization", () => {
   });
 
   it("leaves the cycle unresolved for an unrecognized refresh period", () => {
-    const [window] = normalizeElevenLabsPayload(UNKNOWN_REFRESH).windows;
+    const [window] = normalizeElevenLabsPayload(UNKNOWN_REFRESH, NOW).windows;
     expect(window.startsAt).toBeUndefined();
     expect(window.resetsAt).toBe("2026-07-12T00:00:00.000Z");
     expect(window.kind).toBe("unknown");
@@ -404,10 +404,13 @@ describe("ElevenLabs payload normalization", () => {
 
   it("resolves no reset from a null, zero, or pre-2001 reset field", () => {
     for (const value of [null, 0, -1, 12345, "1783814400"]) {
-      const [window] = normalizeElevenLabsPayload({
-        ...(SUBSCRIPTION as Record<string, unknown>),
-        next_character_count_reset_unix: value,
-      }).windows;
+      const [window] = normalizeElevenLabsPayload(
+        {
+          ...(SUBSCRIPTION as Record<string, unknown>),
+          next_character_count_reset_unix: value,
+        },
+        NOW,
+      ).windows;
       expect(window.resetsAt).toBeUndefined();
       expect(window.startsAt).toBeUndefined();
     }
@@ -439,17 +442,20 @@ describe("ElevenLabs payload normalization", () => {
   });
 
   it("clamps a count that has run past the limit to 100% used", () => {
-    const [window] = normalizeElevenLabsPayload({
-      ...(SUBSCRIPTION as Record<string, unknown>),
-      character_count: 150000,
-    }).windows;
+    const [window] = normalizeElevenLabsPayload(
+      {
+        ...(SUBSCRIPTION as Record<string, unknown>),
+        character_count: 150000,
+      },
+      NOW,
+    ).windows;
     expect(window.percentUsed).toBe(100);
     expect(window.percentRemaining).toBe(0);
   });
 
   it("rejects a response that is not a subscription object", () => {
     for (const payload of [null, [], "nope", 7, {}]) {
-      expect(() => normalizeElevenLabsPayload(payload)).toThrow();
+      expect(() => normalizeElevenLabsPayload(payload, NOW)).toThrow();
     }
   });
 });
@@ -677,8 +683,8 @@ function cachedQuota(): ProviderQuota {
         kind: "monthly",
         percentUsed: 10,
         percentRemaining: 90,
-        startsAt: "2026-08-14T00:00:00.000Z",
-        resetsAt: "2026-09-21T12:00:00.000Z",
+        startsAt: new Date(NOW - 7 * 86_400_000).toISOString(),
+        resetsAt: new Date(NOW + 7 * 86_400_000).toISOString(),
       },
     ],
     state: {
