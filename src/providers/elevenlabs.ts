@@ -223,7 +223,10 @@ async function acquireElevenLabsQuota(
         controller.signal,
         dependencies,
       );
-      const normalized = normalizeElevenLabsPayload(payload);
+      const normalized = normalizeElevenLabsPayload(
+        payload,
+        dependencies.now(),
+      );
       attempts[attempts.length - 1] = {
         source: ELEVENLABS_API_KEY_SOURCE,
         status: "success",
@@ -531,6 +534,7 @@ function rejectHttpFailure(
  */
 export function normalizeElevenLabsPayload(
   payload: unknown,
+  now?: number,
 ): NormalizedElevenLabsPayload {
   const root = objectValue(payload);
   if (!root) {
@@ -554,20 +558,28 @@ export function normalizeElevenLabsPayload(
   if (used !== undefined && limit !== undefined && limit > 0) {
     const percentUsed = Math.min(100, (used / limit) * 100);
     const resetsAt = parseResetUnix(root.next_character_count_reset_unix);
+    // A reset the vendor says has already passed means these counters belong
+    // to a finished cycle. The stale-cache path drops such a window; the live
+    // path must too, or an expired percentage is served as current headroom.
+    const expired =
+      now !== undefined &&
+      resetsAt !== undefined &&
+      Date.parse(resetsAt) <= now;
     const months = refreshPeriodMonths(root.character_refresh_period);
     const startsAt =
       resetsAt && months !== undefined
         ? stepBackMonths(resetsAt, months)
         : undefined;
-    windows.push({
-      id: CHARACTERS_WINDOW_ID,
-      label: "characters",
-      kind: months === 1 ? "monthly" : "unknown",
-      percentUsed,
-      percentRemaining: Math.max(0, ((limit - used) / limit) * 100),
-      ...(startsAt ? { startsAt } : {}),
-      ...(resetsAt ? { resetsAt } : {}),
-    });
+    if (!expired)
+      windows.push({
+        id: CHARACTERS_WINDOW_ID,
+        label: "characters",
+        kind: months === 1 ? "monthly" : "unknown",
+        percentUsed,
+        percentRemaining: Math.max(0, ((limit - used) / limit) * 100),
+        ...(startsAt ? { startsAt } : {}),
+        ...(resetsAt ? { resetsAt } : {}),
+      });
   }
 
   return { ...(plan ? { plan } : {}), windows };

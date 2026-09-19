@@ -15,7 +15,9 @@ import {
 import { elevenLabsCacheContextId } from "../../src/providers/elevenlabs-cache-context.js";
 import type { ProviderAdapter, ProviderQuota } from "../../src/types.js";
 
-const NOW = Date.parse("2026-09-14T12:00:00.000Z");
+// Inside the fixture cycle: its reset is 2026-07-12, and a passed reset
+// publishes no live window.
+const NOW = Date.parse("2026-06-20T12:00:00.000Z");
 const OPTIONS = { allowKeychainPrompt: false, refreshCredentials: false };
 // Synthetic. No real ElevenLabs key or account data appears in this tree.
 const SYNTHETIC_KEY = "synthetic-elevenlabs-key-481";
@@ -316,7 +318,7 @@ describe("ElevenLabs auth classification", () => {
     }).fetchQuota(OPTIONS);
 
     expect(report.state.status).toBe("rate_limited");
-    expect(report.state.retryAfter).toBe("2026-09-14T12:02:00.000Z");
+    expect(report.state.retryAfter).toBe(new Date(NOW + 120_000).toISOString());
     expect(deleted).toEqual([]);
   });
 
@@ -409,6 +411,31 @@ describe("ElevenLabs payload normalization", () => {
       expect(window.resetsAt).toBeUndefined();
       expect(window.startsAt).toBeUndefined();
     }
+  });
+
+  it("publishes no live window once the reported reset has passed", async () => {
+    const report = await testAdapter({
+      fetch: sequentialFetch([
+        jsonResponse({
+          ...(SUBSCRIPTION as Record<string, unknown>),
+          next_character_count_reset_unix: (NOW - 60_000) / 1000,
+        }),
+      ]),
+    }).fetchQuota(OPTIONS);
+
+    expect(report.state.status).toBe("fresh");
+    expect(report.windows).toEqual([]);
+  });
+
+  it("keeps a live window whose reported reset is still ahead", () => {
+    const payload = {
+      ...(SUBSCRIPTION as Record<string, unknown>),
+      next_character_count_reset_unix: (NOW + 60_000) / 1000,
+    };
+    expect(normalizeElevenLabsPayload(payload, NOW).windows).toHaveLength(1);
+    expect(normalizeElevenLabsPayload(payload, NOW + 60_000).windows).toEqual(
+      [],
+    );
   });
 
   it("clamps a count that has run past the limit to 100% used", () => {
